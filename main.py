@@ -118,6 +118,7 @@ async def text_handler(message: Message):
 
     await message.answer("Kurs yozing: Kurs: 1750\nYoki /total bosing.")
 
+
 @dp.message(F.photo)
 async def photo_handler(message: Message):
     uid = message.from_user.id
@@ -128,15 +129,25 @@ async def photo_handler(message: Message):
     image_bytes = bio.getvalue()
 
     await message.answer("Rasm o'qilyapti...")
-    amount, info = await extract_amount_from_image(image_bytes)
+
+    try:
+        amount, info = await extract_amount_from_image(image_bytes)
+    except Exception as e:
+        await message.answer(f"Rasmni o'qishda xato chiqdi:\n{str(e)[:500]}")
+        return
 
     if amount is None:
-        await message.answer("Bu rasmdan summani aniq topa olmadim. Yaqinroq, tiniqroq rasm yuboring.")
+        await message.answer("Summani topa olmadim. Rasm tiniqroq bo‘lsin.")
         return
 
     user_data[uid]["amounts"].append(amount)
     count = len(user_data[uid]["amounts"])
-    await message.answer(f"{count}-rasm: {fmt_num(amount)} ¥ qo'shildi.\nYana rasm yuboring yoki /total bosing.")
+
+    await message.answer(
+        f"{count}-rasm: {fmt_num(amount)} ¥ qo'shildi.\n"
+        f"Jami hozircha: {fmt_num(sum(user_data[uid]['amounts'], Decimal('0')))} ¥\n\n"
+        f"Yana rasm yuboring yoki /total bosing."
+    )
 
 async def health(request):
     return web.Response(text="OK")
