@@ -1,9 +1,4 @@
-
-import os
-import re
-import json
-import base64
-import asyncio
+import os, re, json, base64, asyncio
 from collections import defaultdict
 from io import BytesIO
 from decimal import Decimal, ROUND_HALF_UP
@@ -30,39 +25,53 @@ client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 user_data = defaultdict(lambda: {"rate": None, "amounts": []})
 
 
-def money(x, symbol=""):
-    d = Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    return f"{symbol}{d:,.2f}"
+def d2(x):
+    return Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def yuan(x):
-    d = Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-    return f"¥{d:,.2f}"
+def yuan_fmt(x):
+    return f"¥{d2(x):,.2f}"
+
+
+def usd_fmt(x):
+    return f"${d2(x):,.2f}"
 
 
 def parse_rate(text):
-    m = re.search(r"(kurs|курс|rate)?\s*[:=]?\s*(\d+(?:[.,]\d+)?)", text.lower())
+    text = (text or "").lower().replace(",", ".")
+    m = re.search(r"(kurs|курс|rate)?\s*[:=]?\s*(\d+(?:\.\d+)?)", text)
     if not m:
         return None
     try:
-        rate = Decimal(m.group(2).replace(",", "."))
-        if rate > 0:
-            return rate
+        r = Decimal(m.group(2))
+        if Decimal("5") <= r <= Decimal("9"):
+            return r
     except:
-        return None
+        pass
     return None
+
+
+def clean_json(text):
+    text = text.strip()
+    text = text.replace("```json", "").replace("```", "").strip()
+    return text
 
 
 async def extract_amount_from_image(image_bytes: bytes):
     b64 = base64.b64encode(image_bytes).decode("utf-8")
 
     prompt = """
-Alipay yoki WeChat Pay screenshotidagi ASOSIY TO'LOV SUMMASINI top.
-Faqat Xitoy yuanidagi to'lov summasini ol.
-Telefon, vaqt, karta, order ID, balans, komissiya, raqamlarni olmang.
+Alipay yoki WeChat Pay screenshotidan ASOSIY TO'LOV SUMMASINI top.
+Faqat to'langan Xitoy yuani summasini ol.
 
-Javob faqat JSON bo'lsin:
-{"amount": 1234.56}
+Qoidalar:
+- Karta raqami, vaqt, telefon, order ID, cashback, kupon, reklama narxi, balansni olmang.
+- Ekranda katta ko'rsatilgan to'lov summasini oling.
+- Agar bir nechta summa bo'lsa, asosiy payment amountni oling.
+- Faqat JSON qaytar.
+
+Format:
+{"amount": 4357.00}
 
 Agar topa olmasang:
 {"amount": null}
@@ -87,7 +96,7 @@ Agar topa olmasang:
         temperature=0,
     )
 
-    text = res.choices[0].message.content.strip()
+    text = clean_json(res.choices[0].message.content or "")
 
     try:
         data = json.loads(text)
@@ -95,7 +104,7 @@ Agar topa olmasang:
         if amount is None:
             return None
         return Decimal(str(amount))
-    except Exception:
+    except:
         m = re.search(r"\d+(?:[.,]\d+)?", text)
         if m:
             return Decimal(m.group(0).replace(",", "."))
@@ -106,75 +115,25 @@ Agar topa olmasang:
 async def start(message: Message):
     await message.answer(
         "Assalomu alaykum!\n\n"
-        "Bot Alipay va WeChat screenshotlaridagi yuan summalarni hisoblaydi.\n\n"
-        "1) Kurs yozing: Kurs: 6.78\n"
-        "2) Rasmlarni yuboring\n"
-        "3) Yakunlash: /total\n\n"
-        "Tozalash: /clear"
+        "1) Kurs yozing: 6.79\n"
+        "2) Zakaz rasmlarini yuboring\n"
+        "3) /total bosing\n\n"
+        "Formula:\n"
+        "Jami yuan ÷ kurs = dollar\n"
+        "Dollar × 1.006 = yakuniy summa\n\n"
+        "/clear — tozalash"
     )
-
-
-@dp.message(F.text)
-async def text_handler(message: Message):
-    uid = message.from_user.id
-    text = message.text or ""
-
-    if text.startswith("/clear"):
-        user_data[uid] = {"rate": None, "amounts": []}
-        await message.answer("Tozalandi. Yangi hisob boshlashingiz mumkin.")
-        return
-
-    if text.startswith("/total"):
-        rate = user_data[uid]["rate"]
-        amounts = user_data[uid]["amounts"]
-
-        if not amounts:
-            await message.answer("Hali rasm yuborilmadi.")
-            return
-
-        if not rate:
-            await message.answer("Avval kurs yozing. Masalan: Kurs: 6.78")
-            return
-
-        total_yuan = sum(amounts, Decimal("0"))
-        usd = (total_yuan / rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        service = (usd * Decimal("0.006")).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        final_total = (usd + service).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-
-        lines = []
-        for i, a in enumerate(amounts, 1):
-            lines.append(f"{i}-rasm: {yuan(a)}")
-
-        msg = (
-            "\n".join(lines)
-            + f"\n\nJami yuan: {yuan(total_yuan)}"
-            + f"\nKurs: {rate}"
-            + f"\n\nDollar: {money(usd, '$')}"
-            + f"\nXizmat 0.6%: {money(service, '$')}"
-            + f"\n\n💰 To'lanadigan jami: {money(final_total, '$')}"
-        )
-
-        await message.answer(msg)
-        return
-
-    rate = parse_rate(text)
-    if rate:
-        user_data[uid]["rate"] = rate
-        await message.answer(f"Kurs saqlandi: {rate}\nEndi rasmlarni yuboring.")
-        return
-
-    await message.answer("Kurs yozing: Kurs: 6.78\nYoki /total bosing.")
 
 
 @dp.message(F.photo)
 async def photo_handler(message: Message):
     uid = message.from_user.id
-
     await message.answer("Rasm o'qilyapti...")
 
     try:
         photo = message.photo[-1]
         file = await bot.get_file(photo.file_id)
+
         bio = BytesIO()
         await bot.download_file(file.file_path, bio)
         image_bytes = bio.getvalue()
@@ -187,15 +146,69 @@ async def photo_handler(message: Message):
 
         user_data[uid]["amounts"].append(amount)
         total_now = sum(user_data[uid]["amounts"], Decimal("0"))
+        count = len(user_data[uid]["amounts"])
 
         await message.answer(
-            f"{len(user_data[uid]['amounts'])}-rasm: {yuan(amount)} qo'shildi.\n"
-            f"Hozircha jami: {yuan(total_now)}\n\n"
+            f"{count}-rasm: {yuan_fmt(amount)} qo'shildi.\n"
+            f"Hozircha jami: {yuan_fmt(total_now)}\n\n"
             f"Yana rasm yuboring yoki /total bosing."
         )
 
     except Exception as e:
         await message.answer(f"Xato chiqdi:\n{str(e)[:700]}")
+
+
+@dp.message(F.text)
+async def text_handler(message: Message):
+    uid = message.from_user.id
+    text = message.text or ""
+
+    if text.startswith("/clear"):
+        rate = user_data[uid]["rate"]
+        user_data[uid] = {"rate": rate, "amounts": []}
+        await message.answer("Rasmlar tozalandi. Kurs saqlanib qoldi.")
+        return
+
+    if text.startswith("/total"):
+        rate = user_data[uid]["rate"]
+        amounts = user_data[uid]["amounts"]
+
+        if not rate:
+            await message.answer("Avval kurs yozing. Masalan: 6.79")
+            return
+
+        if not amounts:
+            await message.answer("Hali rasm yuborilmadi.")
+            return
+
+        total_yuan = sum(amounts, Decimal("0"))
+        usd = total_yuan / rate
+        final_total = usd * Decimal("1.006")
+
+        lines = [f"{i}-rasm: {yuan_fmt(a)}" for i, a in enumerate(amounts, 1)]
+
+        msg = (
+            "\n".join(lines)
+            + f"\n\nJami Yuan:\n{yuan_fmt(total_yuan)}"
+            + f"\n\nKurs:\n{rate}"
+            + f"\n\n{total_yuan:,.2f} ÷ {rate}\n= {usd:,.8f} USD"
+            + f"\n\n{usd:,.8f} × 1.006\n= {final_total:,.8f} USD"
+            + f"\n\n💰 Yakuniy summa:\n{usd_fmt(final_total)}"
+        )
+
+        await message.answer(msg)
+
+        # Har zakazdan keyin rasmlar tozalanadi, kurs saqlanadi
+        user_data[uid] = {"rate": rate, "amounts": []}
+        return
+
+    rate = parse_rate(text)
+    if rate:
+        user_data[uid]["rate"] = rate
+        await message.answer(f"Kurs saqlandi: {rate}\nEndi rasmlarni yuboring.")
+        return
+
+    await message.answer("Kurs yozing: 6.79\nYoki /total bosing.")
 
 
 async def health(request):
