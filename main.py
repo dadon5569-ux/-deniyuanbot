@@ -1,4 +1,8 @@
-import os, re, json, base64, asyncio
+import os
+import re
+import json
+import base64
+import asyncio
 from collections import defaultdict
 from io import BytesIO
 from decimal import Decimal, ROUND_HALF_UP
@@ -8,6 +12,7 @@ from aiogram.types import Message
 from aiogram.filters import CommandStart
 from aiohttp import web
 from openai import AsyncOpenAI
+
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -22,6 +27,7 @@ bot = Bot(BOT_TOKEN)
 dp = Dispatcher()
 client = AsyncOpenAI(api_key=OPENAI_API_KEY)
 
+# Har bir foydalanuvchi uchun alohida hisob
 user_data = defaultdict(lambda: {"rate": None, "amounts": []})
 
 
@@ -38,26 +44,38 @@ def usd_fmt(x):
 
 
 def parse_rate(text):
+    """
+    Kurs: 6.79
+    6.79
+    kurs 6,78
+    shu formatlarni qabul qiladi.
+    """
     text = (text or "").lower().replace(",", ".")
     m = re.search(r"(kurs|курс|rate)?\s*[:=]?\s*(\d+(?:\.\d+)?)", text)
     if not m:
         return None
+
     try:
-        r = Decimal(m.group(2))
-        if Decimal("5") <= r <= Decimal("9"):
-            return r
-    except:
-        pass
+        rate = Decimal(m.group(2))
+        # Yuan / Dollar kursi odatda 5-9 oralig'ida
+        if Decimal("5") <= rate <= Decimal("9"):
+            return rate
+    except Exception:
+        return None
+
     return None
 
 
 def clean_json(text):
-    text = text.strip()
+    text = (text or "").strip()
     text = text.replace("```json", "").replace("```", "").strip()
     return text
 
 
 async def extract_amount_from_image(image_bytes: bytes):
+    """
+    Alipay / WeChat screenshotidan asosiy to'lov summasini GPT Vision bilan o'qiydi.
+    """
     b64 = base64.b64encode(image_bytes).decode("utf-8")
 
     prompt = """
@@ -67,6 +85,7 @@ Faqat to'langan Xitoy yuani summasini ol.
 Qoidalar:
 - Karta raqami, vaqt, telefon, order ID, cashback, kupon, reklama narxi, balansni olmang.
 - Ekranda katta ko'rsatilgan to'lov summasini oling.
+- Agar summa minus bilan yozilgan bo'lsa, masalan -17,400.00, natijada musbat 17400.00 qaytar.
 - Agar bir nechta summa bo'lsa, asosiy payment amountni oling.
 - Faqat JSON qaytar.
 
@@ -103,11 +122,11 @@ Agar topa olmasang:
         amount = data.get("amount")
         if amount is None:
             return None
-        return Decimal(str(amount))
-    except:
-        m = re.search(r"\d+(?:[.,]\d+)?", text)
+        return abs(Decimal(str(amount)))
+    except Exception:
+        m = re.search(r"-?\d+(?:[.,]\d+)?", text)
         if m:
-            return Decimal(m.group(0).replace(",", "."))
+            return abs(Decimal(m.group(0).replace(",", ".")))
         return None
 
 
@@ -115,13 +134,16 @@ Agar topa olmasang:
 async def start(message: Message):
     await message.answer(
         "Assalomu alaykum!\n\n"
+        "Men Alipay va WeChat rasmlaridan yuan summani o'qib hisoblayman.\n\n"
+        "Ishlash tartibi:\n"
         "1) Kurs yozing: 6.79\n"
-        "2) Zakaz rasmlarini yuboring\n"
+        "2) Shu zakaz rasmlarini yuboring\n"
         "3) /total bosing\n\n"
         "Formula:\n"
         "Jami yuan ÷ kurs = dollar\n"
-        "Dollar × 1.006 = yakuniy summa\n\n"
-        "/clear — tozalash"
+        "Dollar + 0.6% xizmat = yakuniy summa\n\n"
+        "/clear — rasmlarni tozalash\n"
+        "/start — yordam"
     )
 
 
@@ -182,8 +204,14 @@ async def text_handler(message: Message):
             return
 
         total_yuan = sum(amounts, Decimal("0"))
+
+        # Asosiy formula:
+        # Jami yuan / kurs = dollar
+        # Dollar * 0.006 = xizmat 0.6%
+        # Dollar + xizmat = yakuniy summa
         usd = total_yuan / rate
-        final_total = usd * Decimal("1.006")
+        service = usd * Decimal("0.006")
+        final_total = usd + service
 
         lines = [f"{i}-rasm: {yuan_fmt(a)}" for i, a in enumerate(amounts, 1)]
 
@@ -191,14 +219,18 @@ async def text_handler(message: Message):
             "\n".join(lines)
             + f"\n\nJami Yuan:\n{yuan_fmt(total_yuan)}"
             + f"\n\nKurs:\n{rate}"
-            + f"\n\n{total_yuan:,.2f} ÷ {rate}\n= {usd:,.8f} USD"
-            + f"\n\n{usd:,.8f} × 1.006\n= {final_total:,.8f} USD"
-            + f"\n\n💰 Yakuniy summa:\n{usd_fmt(final_total)}"
+            + f"\n\n{total_yuan:,.2f} ÷ {rate}"
+            + f"\n= {usd:,.8f} USD"
+            + f"\n\n0.6% xizmat:"
+            + f"\n+ {service:,.8f} USD"
+            + f"\n\n💰 Yakuniy summa:"
+            + f"\n{usd_fmt(final_total)}"
         )
 
         await message.answer(msg)
 
-        # Har zakazdan keyin rasmlar tozalanadi, kurs saqlanadi
+        # Har bir zakaz /total dan keyin yopiladi.
+        # Kurs saqlanadi, rasmlar tozalanadi.
         user_data[uid] = {"rate": rate, "amounts": []}
         return
 
